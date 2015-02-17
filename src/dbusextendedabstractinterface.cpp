@@ -23,9 +23,15 @@
  */
 
 
+#include "dbusextendedpendingcallwatcher_p.h"
+
 #include <DBusExtendedAbstractInterface>
 
 #include <QtDBus/QDBusMetaType>
+#include <QtDBus/QDBusMessage>
+#include <QtDBus/QDBusPendingCall>
+#include <QtDBus/QDBusPendingCallWatcher>
+#include <QtDBus/QDBusPendingReply>
 
 #include <QtCore/QDebug>
 #include <QtCore/QMetaProperty>
@@ -39,7 +45,9 @@ Q_GLOBAL_STATIC_WITH_ARGS(QByteArray, propertyInvalidatedSignature, ("propertyIn
 
 DBusExtendedAbstractInterface::DBusExtendedAbstractInterface(const QString &service, const QString &path, const char *interface, const QDBusConnection &connection, QObject *parent)
     : QDBusAbstractInterface(service, path, interface, connection, parent)
-    , m_lastPropertyChangedError()
+    , m_sync(false)
+    , m_useCache(false)
+    , m_getAllPendingCallWatcher(0)
     , m_propertiesChangedConnected(false)
 {
 }
@@ -48,9 +56,52 @@ DBusExtendedAbstractInterface::~DBusExtendedAbstractInterface()
 {
 }
 
-QDBusError DBusExtendedAbstractInterface::lastPropertyChangedError() const
+void DBusExtendedAbstractInterface::getAllProperties()
 {
-    return m_lastPropertyChangedError;
+    m_lastExtendedError = QDBusError();
+
+    if (!isValid()) {
+        QString errorMessage = QStringLiteral("This Extended DBus interface is not valid yet.");
+        m_lastExtendedError = QDBusMessage::createError(QDBusError::Failed, errorMessage);
+        qDebug() << Q_FUNC_INFO << errorMessage;
+        return;
+    }
+
+    if (!m_sync && m_getAllPendingCallWatcher) {
+        // Call already in place, not repeating ...
+        return;
+    }
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(service(), path(), *dBusPropertiesInterface(), QStringLiteral("GetAll"));
+    msg << interface();
+
+    if (m_sync) {
+        QDBusMessage reply = connection().call(msg);
+
+        if (reply.type() != QDBusMessage::ReplyMessage) {
+            m_lastExtendedError = QDBusError(reply);
+            qWarning() << Q_FUNC_INFO << m_lastExtendedError.message();
+            return;
+        }
+
+        if (reply.signature() != QLatin1String("a{sv}")) {
+            QString errorMessage = QStringLiteral("Invalid signature \"%1\" in return from call to %2")
+                .arg(reply.signature(),
+                     QString(*dBusPropertiesInterface()));
+            qWarning() << Q_FUNC_INFO << errorMessage;
+            m_lastExtendedError = QDBusError(QDBusError::InvalidSignature, errorMessage);
+            return;
+        }
+
+        QVariantMap value = reply.arguments().at(0).toMap();
+        onPropertiesChanged(interface(), value, QStringList());
+    } else {
+        QDBusPendingReply<QVariantMap> async = connection().asyncCall(msg);
+        m_getAllPendingCallWatcher = new QDBusPendingCallWatcher(async, this);
+
+        connect(m_getAllPendingCallWatcher, SIGNAL(finished(QDBusPendingCallWatcher*)), this, SLOT(onAsyncGetAllPropertiesFinished(QDBusPendingCallWatcher*)));
+        return;
+    }
 }
 
 void DBusExtendedAbstractInterface::connectNotify(const QMetaMethod &signal)
@@ -95,6 +146,196 @@ void DBusExtendedAbstractInterface::disconnectNotify(const QMetaMethod &signal)
     }
 }
 
+QVariant DBusExtendedAbstractInterface::internalPropGet(const char *propname, void *propertyPtr)
+{
+    m_lastExtendedError = QDBusError();
+
+    if (m_useCache) {
+        int propertyIndex = metaObject()->indexOfProperty(propname);
+        QMetaProperty metaProperty = metaObject()->property(propertyIndex);
+        return QVariant(metaProperty.type(), propertyPtr);
+    }
+
+    if (m_sync) {
+        return property(propname);
+    } else {
+        if (!isValid()) {
+            QString errorMessage = QStringLiteral("This Extended DBus interface is not valid yet.");
+            m_lastExtendedError = QDBusMessage::createError(QDBusError::Failed, errorMessage);
+            qDebug() << Q_FUNC_INFO << errorMessage;
+            return QVariant();
+        }
+
+        int propertyIndex = metaObject()->indexOfProperty(propname);
+
+        if (-1 == propertyIndex) {
+            QString errorMessage = QStringLiteral("Got unknown property \"%1\" to read")
+                .arg(QString::fromLatin1(propname));
+            m_lastExtendedError = QDBusMessage::createError(QDBusError::Failed, errorMessage);
+            qWarning() << Q_FUNC_INFO << errorMessage;
+            return QVariant();
+        }
+
+        QMetaProperty metaProperty = metaObject()->property(propertyIndex);
+
+        if (!metaProperty.isReadable()) {
+            QString errorMessage = QStringLiteral("Property \"%1\" is NOT readable")
+                .arg(QString::fromLatin1(propname));
+            m_lastExtendedError = QDBusMessage::createError(QDBusError::Failed, errorMessage);
+            qWarning() << Q_FUNC_INFO << errorMessage;
+            return QVariant();
+        }
+
+        // is this metatype registered?
+        const char *expectedSignature = "";
+        if (int(metaProperty.type()) != QMetaType::QVariant) {
+            expectedSignature = QDBusMetaType::typeToSignature(metaProperty.userType());
+            if (0 == expectedSignature) {
+                QString errorMessage =
+                    QStringLiteral("Type %1 must be registered with Qt D-Bus "
+                                   "before it can be used to read property "
+                                   "%2.%3")
+                    .arg(metaProperty.typeName(),
+                         interface(),
+                         propname);
+                m_lastExtendedError = QDBusMessage::createError(QDBusError::Failed, errorMessage);
+                qWarning() << Q_FUNC_INFO << errorMessage;
+                return QVariant();
+            }
+        }
+
+        asyncProperty(propname);
+        return QVariant(metaProperty.type(), propertyPtr);
+    }
+}
+
+void DBusExtendedAbstractInterface::internalPropSet(const char *propname, const QVariant &value, void *propertyPtr)
+{
+    m_lastExtendedError = QDBusError();
+
+    if (m_sync) {
+        setProperty(propname, value);
+    } else {
+        if (!isValid()) {
+            QString errorMessage = QStringLiteral("This interface is not yet valid");
+            m_lastExtendedError = QDBusMessage::createError(QDBusError::Failed, errorMessage);
+            qDebug() << Q_FUNC_INFO << errorMessage;
+            return;
+        }
+
+        int propertyIndex = metaObject()->indexOfProperty(propname);
+
+        if (-1 == propertyIndex) {
+            QString errorMessage = QStringLiteral("Got unknown property \"%1\" to write")
+                .arg(QString::fromLatin1(propname));
+            m_lastExtendedError = QDBusMessage::createError(QDBusError::Failed, errorMessage);
+            qWarning() << Q_FUNC_INFO << errorMessage;
+            return;
+        }
+
+        QMetaProperty metaProperty = metaObject()->property(propertyIndex);
+
+        if (!metaProperty.isWritable()) {
+            QString errorMessage = QStringLiteral("Property \"%1\" is NOT writable")
+                .arg(QString::fromLatin1(propname));
+            m_lastExtendedError = QDBusMessage::createError(QDBusError::Failed, errorMessage);
+            qWarning() << Q_FUNC_INFO << errorMessage;
+            return;
+        }
+
+        asyncSetProperty(propname, QVariant(metaProperty.type(), propertyPtr));
+    }
+}
+
+QVariant DBusExtendedAbstractInterface::asyncProperty(const QString &propertyName)
+{
+    QDBusMessage msg = QDBusMessage::createMethodCall(service(), path(), *dBusPropertiesInterface(), QStringLiteral("Get"));
+    msg << interface() << propertyName;
+    QDBusPendingReply<QVariant> async = connection().asyncCall(msg);
+    DBusExtendedPendingCallWatcher *watcher = new DBusExtendedPendingCallWatcher(async, propertyName, QVariant(), this);
+
+    connect(watcher, SIGNAL(finished(QDBusPendingCallWatcher*)), this, SLOT(onAsyncPropertyFinished(QDBusPendingCallWatcher*)));
+
+    return QVariant();
+}
+
+void DBusExtendedAbstractInterface::asyncSetProperty(const QString &propertyName, const QVariant &value)
+{
+    QDBusMessage msg = QDBusMessage::createMethodCall(service(), path(), *dBusPropertiesInterface(), QStringLiteral("Set"));
+    msg << interface() << propertyName << value;
+    QDBusPendingReply<QVariant> async = connection().asyncCall(msg);
+    DBusExtendedPendingCallWatcher *watcher = new DBusExtendedPendingCallWatcher(async, propertyName, value, this);
+
+    connect(watcher, SIGNAL(finished(QDBusPendingCallWatcher*)), this, SLOT(onAsyncSetPropertyFinished(QDBusPendingCallWatcher*)));
+}
+
+void DBusExtendedAbstractInterface::onAsyncPropertyFinished(DBusExtendedPendingCallWatcher *watcher)
+{
+    QDBusPendingReply<QVariant> reply = *watcher;
+
+    if (reply.isError()) {
+        m_lastExtendedError = reply.error();
+    } else {
+        int propertyIndex = metaObject()->indexOfProperty(watcher->asyncProperty().toLatin1().constData());
+        QVariant value = demarshall(interface(),
+                                    metaObject()->property(propertyIndex),
+                                    reply.value(),
+                                    &m_lastExtendedError);
+
+        if (m_lastExtendedError.isValid()) {
+            emit propertyInvalidated(watcher->asyncProperty());
+        } else {
+            emit propertyChanged(watcher->asyncProperty(), value);
+        }
+    }
+
+    emit asyncPropertyFinished(watcher->asyncProperty());
+    watcher->deleteLater();
+}
+
+void DBusExtendedAbstractInterface::onAsyncSetPropertyFinished(DBusExtendedPendingCallWatcher *watcher)
+{
+    QDBusPendingReply<QVariant> reply = *watcher;
+
+    if (reply.isError()) {
+        m_lastExtendedError = reply.error();
+    } else {
+        m_lastExtendedError = QDBusError();
+    }
+
+    emit asyncSetPropertyFinished(watcher->asyncProperty());
+
+    // Resetting the property to its previous value after sending the
+    // finished signal
+    if (reply.isError()) {
+        m_lastExtendedError = QDBusError();
+        emit propertyChanged(watcher->asyncProperty(), watcher->previousValue());
+    }
+
+    watcher->deleteLater();
+}
+
+void DBusExtendedAbstractInterface::onAsyncGetAllPropertiesFinished(QDBusPendingCallWatcher *watcher)
+{
+    m_getAllPendingCallWatcher = 0;
+
+    QDBusPendingReply<QVariantMap> reply = *watcher;
+
+    if (reply.isError()) {
+        m_lastExtendedError = reply.error();
+    } else {
+        m_lastExtendedError = QDBusError();
+    }
+
+    emit asyncGetAllPropertiesFinished();
+
+    if (!reply.isError()) {
+        onPropertiesChanged(interface(), reply.value(), QStringList());
+    }
+
+    watcher->deleteLater();
+}
+
 void DBusExtendedAbstractInterface::onPropertiesChanged(const QString& interfaceName,
                                                         const QVariantMap& changedProperties,
                                                         const QStringList& invalidatedProperties)
@@ -107,9 +348,9 @@ void DBusExtendedAbstractInterface::onPropertiesChanged(const QString& interface
             if (-1 == propertyIndex) {
                 qDebug() << Q_FUNC_INFO << "Got unknown changed property" <<  i.key();
             } else {
-                QVariant value = demarshall(interface(), metaObject()->property(propertyIndex), i.value(), &m_lastPropertyChangedError);
+                QVariant value = demarshall(interface(), metaObject()->property(propertyIndex), i.value(), &m_lastExtendedError);
 
-                if (m_lastPropertyChangedError.isValid()) {
+                if (m_lastExtendedError.isValid()) {
                     emit propertyInvalidated(i.key());
                 } else {
                     emit propertyChanged(i.key(), value);
@@ -124,7 +365,7 @@ void DBusExtendedAbstractInterface::onPropertiesChanged(const QString& interface
             if (-1 == metaObject()->indexOfProperty(j->toLatin1().constData())) {
                 qDebug() << Q_FUNC_INFO << "Got unknown invalidated property" <<  *j;
             } else {
-                m_lastPropertyChangedError = QDBusError();
+                m_lastExtendedError = QDBusError();
                 emit propertyInvalidated(*j);
             }
 
@@ -196,4 +437,3 @@ QVariant DBusExtendedAbstractInterface::demarshall(const QString &interface, con
 
     return result;
 }
-

@@ -17,11 +17,13 @@ DEFINES += QT_DBUS_EXTENDED_LIBRARY
 CONFIG += create_pc create_prl no_install_prl
 
 SOURCES += \
-    dbusextendedabstractinterface.cpp
+    dbusextendedabstractinterface.cpp \
+    dbusextendedpendingcallwatcher.cpp
 
 HEADERS += \
     dbusextended.h \
-    dbusextendedabstractinterface.h
+    dbusextendedabstractinterface.h \
+    dbusextendedpendingcallwatcher_p.h
 
 INSTALL_HEADERS = \
     DBusExtended \

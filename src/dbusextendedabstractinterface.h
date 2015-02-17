@@ -31,6 +31,9 @@
 #include <QDBusAbstractInterface>
 #include <QDBusError>
 
+class QDBusPendingCallWatcher;
+class DBusExtendedPendingCallWatcher;
+
 class QT_DBUS_EXTENDED_EXPORT DBusExtendedAbstractInterface: public QDBusAbstractInterface
 {
     Q_OBJECT
@@ -38,14 +41,16 @@ class QT_DBUS_EXTENDED_EXPORT DBusExtendedAbstractInterface: public QDBusAbstrac
 public:
     virtual ~DBusExtendedAbstractInterface();
 
-    QDBusError lastPropertyChangedError() const;
+    Q_PROPERTY(bool sync READ sync WRITE setSync)
+    inline bool sync() const { return m_sync; }
+    inline void setSync(bool sync) { m_sync = sync; }
 
-    // It could be interesting to have a "refresh" method implementing
-    // the "GetAll" DBus properties method in order to improve DBUs
-    // traffic performance since we already have a demarshalling
-    // implementation but we don't really need it by now. In addition,
-    // it is unclear how to face the value change in properties
-    // without notification signal.
+    Q_PROPERTY(bool useCache READ useCache WRITE setUseCache)
+    inline bool useCache() const { return m_useCache; }
+    inline void setUseCache(bool useCache) { m_useCache = useCache; }
+
+    void getAllProperties();
+    inline QDBusError lastExtendedError() const { return m_lastExtendedError; };
 
 protected:
     DBusExtendedAbstractInterface(const QString &service,
@@ -56,19 +61,33 @@ protected:
 
     void connectNotify(const QMetaMethod &signal);
     void disconnectNotify(const QMetaMethod &signal);
+    QVariant internalPropGet(const char *propname, void *propertyPtr);
+    void internalPropSet(const char *propname, const QVariant &value, void *propertyPtr);
 
 Q_SIGNALS:
     void propertyChanged(const QString &propertyName, const QVariant &value);
     void propertyInvalidated(const QString &propertyName);
+    void asyncPropertyFinished(const QString &propertyName);
+    void asyncSetPropertyFinished(const QString &propertyName);
+    void asyncGetAllPropertiesFinished();
 
 private Q_SLOTS:
     void onPropertiesChanged(const QString& interfaceName,
                              const QVariantMap& changedProperties,
                              const QStringList& invalidatedProperties);
+    void onAsyncPropertyFinished(DBusExtendedPendingCallWatcher *watcher);
+    void onAsyncSetPropertyFinished(DBusExtendedPendingCallWatcher *watcher);
+    void onAsyncGetAllPropertiesFinished(QDBusPendingCallWatcher *watcher);
+
 private:
+    QVariant asyncProperty(const QString &propertyName);
+    void asyncSetProperty(const QString &propertyName, const QVariant &value);
     static QVariant demarshall(const QString &interface, const QMetaProperty &metaProperty, const QVariant &value, QDBusError *error);
 
-    QDBusError m_lastPropertyChangedError;
+    bool m_sync;
+    bool m_useCache;
+    QDBusPendingCallWatcher *m_getAllPendingCallWatcher;
+    QDBusError m_lastExtendedError;
     bool m_propertiesChangedConnected;
 };
 
