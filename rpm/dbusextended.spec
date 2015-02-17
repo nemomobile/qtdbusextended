@@ -1,7 +1,7 @@
 Name:       dbusextended-qt5
 
 Summary:    Extended DBus for Qt
-Version:    0.0.1
+Version:    0.0.2
 Release:    1
 Group:      Development/Libraries
 License:    LGPL 2.1
