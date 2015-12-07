@@ -4,7 +4,7 @@ Summary:    Extended DBus for Qt
 Version:    0.0.2
 Release:    1
 Group:      Development/Libraries
-License:    LGPL 2.1
+License:    LGPLv2.1
 URL:        https://github.com/nemomobile/qtdbusextended
 Source0:    %{name}-%{version}.tar.bz2
 Requires(post): /sbin/ldconfig
@@ -17,7 +17,6 @@ BuildRequires:  pkgconfig(Qt5DBus)
 
 %package devel
 Summary:    Development files for %{name}
-Group:      Development/Libraries
 Requires:   %{name} = %{version}-%{release}
 
 %description devel
