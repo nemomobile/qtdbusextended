@@ -9,6 +9,7 @@ URL:        https://github.com/nemomobile/qtdbusextended
 Source0:    %{name}-%{version}.tar.bz2
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
+BuildRequires:  cmake
 BuildRequires:  pkgconfig(Qt5Core)
 BuildRequires:  pkgconfig(Qt5DBus)
 
@@ -26,15 +27,20 @@ Development files for %{name}.
 %setup -q -n %{name}-%{version}
 
 %build
-
-%qmake5
-
-make %{?_smp_mflags}
+mkdir build
+cd build
+cmake \
+	-DCMAKE_BUILD_TYPE=None \
+	-DCMAKE_INSTALL_PREFIX=%{_prefix} \
+	-DCMAKE_INSTALL_LIBDIR=%{_lib} \
+	-DCMAKE_VERBOSE_MAKEFILE=ON \
+	..
+cmake --build .
 
 %install
+cd build
 rm -rf %{buildroot}
-
-%qmake5_install
+DESTDIR=%{buildroot} cmake --build . --target install
 
 %post -p /sbin/ldconfig
 
@@ -47,9 +53,10 @@ rm -rf %{buildroot}
 %files devel
 %defattr(-,root,root,-)
 %{_datarootdir}/qt5/mkspecs/features/%{name}.prf
-%{_includedir}/qt5/DBusExtended/DBusExtended
-%{_includedir}/qt5/DBusExtended/DBusExtendedAbstractInterface
-%{_includedir}/qt5/DBusExtended/dbusextended.h
-%{_includedir}/qt5/DBusExtended/dbusextendedabstractinterface.h
+%{_includedir}/dbusextended/DBusExtended
+%{_includedir}/dbusextended/DBusExtendedAbstractInterface
+%{_includedir}/dbusextended/dbusextended.h
+%{_includedir}/dbusextended/dbusextendedabstractinterface.h
 %{_libdir}/lib*.so
 %{_libdir}/pkgconfig/%{name}.pc
+%{_libdir}/cmake/dbusextended/*.cmake
